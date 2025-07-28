@@ -4,52 +4,80 @@ from datetime import datetime
 import sys
 import time
 
-# Load past chats
+# Initialize memory
 try:
     with open("memory.json", "r") as f:
         memory = json.load(f)
-except FileNotFoundError:
-    memory = []
+except (FileNotFoundError, json.JSONDecodeError):
+    memory = [{"role": "system", "content": "You are a helpful AI assistant."}]
 
 
-def chat(input_text):
-    global memory  # Allow modifying the global memory
+def chat(user_input, stream=False):
+    global memory
 
-    # Add user message to memory
-    memory.append({"role": "user", "content": input_text, "time": str(datetime.now())})
+    # Add user message
+    memory.append({"role": "user", "content": user_input})
 
-    # Generate response
-    response = ollama.chat(
-        model='phi3',
-        messages=[{"role": "user", "content": input_text}],  # Comma added here
-        options={
-            "num_predict": 64,  # Shorter responses
-            "temperature": 0.7,  # Less randomness = faster
-            "seed": 123,  # Consistent outputs
-            "num_ctx": 1024  # Smaller context window
-        }
-    )
+    try:
+        if stream:
+            # Streaming response
+            print("AI: ", end="", flush=True)
+            stream = ollama.chat(
+                model='phi3',
+                messages=[m for m in memory if m["role"] != "time"],
+                stream=True,
+                options={
+                    "num_predict": 128,
+                    "temperature": 0.7,
+                    "num_ctx": 2048
+                }
+            )
 
-    # Extract the actual response content
-    ai_response = response['message']['content']
+            ai_response = ""
+            for chunk in stream:
+                print(chunk['message']['content'], end="", flush=True)
+                ai_response += chunk['message']['content']
+            print()
 
-    # Add AI reply to memory
-    memory.append({"role": "assistant", "content": ai_response, "time": str(datetime.now())})
+        else:
+            # Regular response
+            response = ollama.chat(
+                model='phi3',
+                messages=[m for m in memory if m["role"] != "time"],
+                options={
+                    "num_predict": 128,
+                    "temperature": 0.7,
+                    "num_ctx": 2048
+                }
+            )
+            ai_response = response['message']['content']
+            print("AI:", ai_response)
 
-    # Memory management
-    if len(memory) > 20:  # Keep last 20 exchanges
-        memory = memory[-20:]
+        # Add AI response
+        memory.append({"role": "assistant", "content": ai_response})
 
-    if len(memory) > 10:
-        summary_prompt = f"Summarize this concisely:\n{str(memory[:-5])}"
-        summary = ollama.generate(model='phi3', prompt=summary_prompt)
-        memory = [{"role": "system", "content": "Previous chats summarized: " + summary}] + memory[-5:]
+        # Maintain memory size
+        if len(memory) > 20:
+            # Try to summarize if too long
+            try:
+                summary = ollama.generate(
+                    model='phi3',
+                    prompt=f"Summarize this conversation in 1-2 sentences:\n{str(memory[:-10])}"
+                )['response']
+                memory = [memory[0],
+                          {"role": "system", "content": f"Previous conversation summary: {summary}"}] + memory[-10:]
+            except:
+                memory = memory[-15:]  # Fallback truncation
 
-    # Save to disk
-    with open("memory.json", "w") as f:
-        json.dump(memory, f, indent=2)
+        # Save to disk
+        with open("memory.json", "w") as f:
+            json.dump(memory, f, indent=2)
 
-    return ai_response
+        return ai_response
+
+    except Exception as e:
+        print(f"\nError: {str(e)}")
+        return "Sorry, I encountered an error."
 
 
 def print_typing():
@@ -60,17 +88,19 @@ def print_typing():
     print()
 
 
-# CLI interface
+# Main loop
 print("Your AI: Hi! Ask or tell me anything. Type 'quit' to exit.")
+print("Tip: Start your message with 'stream' for word-by-word response")
 while True:
-    user_input = input("You: ")
+    user_input = input("\nYou: ").strip()
+    if not user_input:
+        continue
     if user_input.lower() == "quit":
         break
 
+    stream_mode = user_input.lower().startswith('stream')
+    if stream_mode:
+        user_input = user_input[6:].strip()  # Remove 'stream' prefix
+
     print_typing()
-
-    # Choose EITHER streaming OR regular chat:
-
-    # Option 1: Regular chat (uses the chat() function with memory)
-    response = chat(user_input)
-    print("AI:", response)
+    chat(user_input, stream=stream_mode)
